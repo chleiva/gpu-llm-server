@@ -1,0 +1,8 @@
+{
+  "model_name_or_path": "mistralai/Mistral-Small-24B-Instruct-2501",
+  "model_cache_dir": null,
+  "use_local_files_only": false,
+  "use_quantization": true,
+  "quantization_bits": 8,
+  "device_map": "auto"
+}
