@@ -49,8 +49,8 @@ def chat_completions():
     try:
         data = request.json
         messages = data.get('messages', [])
-        max_tokens = data.get('max_tokens', 256)
-        temperature = data.get('temperature', 0.7)
+        max_tokens = data.get('max_tokens', 10000)
+        temperature = data.get('temperature', 0.1)
         
         # Add reasoning level if specified
         reasoning = data.get('reasoning_level', 'medium')
