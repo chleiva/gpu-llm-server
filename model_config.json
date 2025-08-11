@@ -1,8 +1,7 @@
 {
-  "model_name_or_path": "mistralai/Mistral-Small-24B-Instruct-2501",
-  "model_cache_dir": null,
-  "use_local_files_only": false,
-  "use_quantization": true,
-  "quantization_bits": 8,
-  "device_map": "auto"
-}
+    "model_path": "./models/mistral-small-3.2-24b-instruct-2506-q8_0.gguf",
+    "n_gpu_layers": -1,
+    "n_ctx": 8192,
+    "n_batch": 512,
+    "verbose": false
+  }

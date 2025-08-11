@@ -3,10 +3,9 @@ import json
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from llama_cpp import Llama
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -14,12 +13,11 @@ logger = logging.getLogger(__name__)
 
 # Configuration class
 class ModelConfig(BaseModel):
-    model_name_or_path: str = "mistralai/Mistral-Small-24B-Instruct-2501"
-    model_cache_dir: Optional[str] = None
-    use_local_files_only: bool = False
-    use_quantization: bool = True
-    quantization_bits: int = Field(default=8, ge=4, le=8)
-    device_map: str = "auto"
+    model_path: str = "./models/mistral-small-3.2-24b-instruct-2506-q8_0.gguf"
+    n_gpu_layers: int = -1  # Use all GPU layers
+    n_ctx: int = 8192  # Context window
+    n_batch: int = 512  # Batch size
+    verbose: bool = False
 
 def load_config(config_path: str = "model_config.json") -> ModelConfig:
     """Load configuration from JSON file with fallbacks"""
@@ -41,7 +39,7 @@ def load_config(config_path: str = "model_config.json") -> ModelConfig:
 # Load configuration
 config = load_config()
 
-# Request/Response models
+# Request/Response models (keeping your existing structure)
 class InferenceRequest(BaseModel):
     prompt: str
     max_tokens: int = Field(default=1000, ge=1, le=4096)
@@ -60,77 +58,48 @@ class ModelInfo(BaseModel):
     local_files_only: bool
 
 # Global model variables
-model = None
-tokenizer = None
+llm = None
 model_info = {}
 
-def get_quantization_config():
-    """Create quantization config based on settings"""
-    if not config.use_quantization:
-        return None
-    
-    if config.quantization_bits == 8:
-        return BitsAndBytesConfig(
-            load_in_8bit=True,
-            bnb_8bit_quant_type="nf4",
-            bnb_8bit_compute_dtype=torch.bfloat16,
-            bnb_8bit_use_double_quant=True,
-        )
-    elif config.quantization_bits == 4:
-        return BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_use_double_quant=True,
-        )
-    else:
-        logger.warning(f"Unsupported quantization bits: {config.quantization_bits}. Disabling quantization.")
-        return None
-
 def load_model_once():
-    """Load model once at startup"""
-    global model, tokenizer, model_info
+    """Load GGUF model once at startup"""
+    global llm, model_info
     
-    if model is not None:
+    if llm is not None:
         return
     
-    logger.info(f"Loading model from: {config.model_name_or_path}")
-    logger.info(f"Local files only: {config.use_local_files_only}")
-    logger.info(f"Cache directory: {config.model_cache_dir}")
-    logger.info(f"Quantization: {config.use_quantization} ({config.quantization_bits}bit)")
+    model_path = config.model_path
+    
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model file not found: {model_path}. Please download it first.")
+    
+    logger.info(f"Loading GGUF model from: {model_path}")
+    logger.info(f"GPU layers: {config.n_gpu_layers}")
+    logger.info(f"Context window: {config.n_ctx}")
+    logger.info(f"Batch size: {config.n_batch}")
     
     try:
-        # Get quantization config
-        quantization_config = get_quantization_config()
-        
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            config.model_name_or_path,
-            cache_dir=config.model_cache_dir,
-            local_files_only=config.use_local_files_only,
-        )
-        
-        # Load model
-        model = AutoModelForCausalLM.from_pretrained(
-            config.model_name_or_path,
-            device_map=config.device_map,
-            quantization_config=quantization_config,
-            cache_dir=config.model_cache_dir,
-            local_files_only=config.use_local_files_only,
-            torch_dtype=torch.bfloat16 if quantization_config is None else None,
+        llm = Llama(
+            model_path=model_path,
+            n_gpu_layers=config.n_gpu_layers,
+            n_ctx=config.n_ctx,
+            n_batch=config.n_batch,
+            verbose=config.verbose
         )
         
         # Store model info
         model_info = {
-            "model_name": config.model_name_or_path,
-            "quantized": config.use_quantization,
-            "quantization_bits": config.quantization_bits if config.use_quantization else None,
-            "device_map": config.device_map,
-            "local_files_only": config.use_local_files_only,
-            "cache_dir": config.model_cache_dir or "default"
+            "model_name": os.path.basename(model_path),
+            "model_type": "GGUF",
+            "quantization": "Q8_0",
+            "quantized": True,
+            "device_map": "GPU" if config.n_gpu_layers != 0 else "CPU",
+            "local_files_only": True,
+            "gpu_layers": config.n_gpu_layers,
+            "context_window": config.n_ctx
         }
         
-        logger.info("Model loaded successfully!")
+        logger.info("GGUF model loaded successfully!")
         logger.info(f"Model info: {model_info}")
         
     except Exception as e:
@@ -139,8 +108,8 @@ def load_model_once():
 
 # FastAPI app
 app = FastAPI(
-    title="Generic LLM Inference API",
-    description="Flexible inference server for HuggingFace LLMs with quantization support",
+    title="GGUF LLM Inference API",
+    description="Inference server for GGUF format models with GPU acceleration",
     version="1.0.0"
 )
 
@@ -154,7 +123,7 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy", 
-        "model_loaded": model is not None,
+        "model_loaded": llm is not None,
         "model_info": model_info
     }
 
@@ -164,36 +133,38 @@ async def get_model_info():
     if not model_info:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    return ModelInfo(**model_info)
+    return ModelInfo(
+        model_name=model_info["model_name"],
+        quantized=model_info["quantized"],
+        device_map=model_info["device_map"],
+        local_files_only=model_info["local_files_only"]
+    )
 
 @app.post("/inference", response_model=InferenceResponse)
 async def inference(request: InferenceRequest):
     """Inference endpoint"""
-    if model is None:
+    if llm is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
     try:
-        # Prepare input
-        inputs = tokenizer(request.prompt, return_tensors="pt")
+        # Format prompt for Mistral (adjust if needed)
+        formatted_prompt = f"<s>[INST] {request.prompt} [/INST]"
         
-        # Generate
-        with torch.no_grad():
-            outputs = model.generate(
-                inputs.input_ids,
-                max_new_tokens=request.max_tokens,
-                temperature=request.temperature,
-                top_p=request.top_p,
-                repetition_penalty=request.repetition_penalty,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id
-            )
+        # Generate response
+        output = llm(
+            formatted_prompt,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=request.top_p,
+            repeat_penalty=request.repetition_penalty,
+            echo=False,
+            stop=["</s>", "[/INST]", "<|endoftext|>"]
+        )
         
-        # Decode response (skip the input prompt)
-        full_response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        response_only = full_response[len(request.prompt):].strip()
+        response_text = output['choices'][0]['text'].strip()
         
         return InferenceResponse(
-            response=response_only,
+            response=response_text,
             model_info=model_info
         )
     
