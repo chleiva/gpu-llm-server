@@ -59,21 +59,34 @@ def load_model_once():
             bnb_8bit_use_double_quant=use_nested_quant,
         )
         
-        logger.info("Loading model: mistralai/Mistral-Small-3.1-24B-Base-2503 (24B params, Apache 2.0)")
-        logger.info("Features: 128k context, vision capabilities, multilingual")
-        logger.info("Quantization: 8-bit with nf4, bfloat16")
+        logger.info("Loading YOUR local GGUF model: mistral-small-3.2-24b-instruct-2506-q8_0.gguf")
+        logger.info("Using Transformers with local GGUF file support")
         
-        # Load model (using latest public Mistral Small 3.1)
-        model_name = "mistralai/Mistral-Small-3.1-24B-Base-2503"  # 24B params, Apache 2.0, public
+        # Load YOUR local GGUF model with Transformers
+        model_path = "./models"
+        gguf_filename = "mistral-small-3.2-24b-instruct-2506-q8_0.gguf"
+        
+        # First install gguf if needed
+        try:
+            import gguf
+        except ImportError:
+            logger.info("Installing gguf package...")
+            import subprocess
+            subprocess.check_call(["pip", "install", "gguf"])
         
         model = AutoModelForCausalLM.from_pretrained(
-            model_name,
+            model_path,
+            gguf_file=gguf_filename,
             device_map="auto",
-            quantization_config=bnb_config,
+            torch_dtype=torch.bfloat16,
+            local_files_only=True
         )
         
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # Load tokenizer - might need to use a compatible one
+        tokenizer = AutoTokenizer.from_pretrained(
+            "mistralai/Mistral-7B-Instruct-v0.3",  # Compatible tokenizer
+            local_files_only=False
+        )
         
         # Create pipeline (customer's exact setup, but without streamer for API use)
         text_generation_pipeline = pipeline(
