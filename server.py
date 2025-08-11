@@ -59,18 +59,21 @@ def load_model_once():
             bnb_8bit_use_double_quant=use_nested_quant,
         )
         
-        logger.info("Loading model: mistralai/Mistral-Small-24B-Instruct-2501")
+        logger.info("Loading model: mistralai/Mistral-Small-3.1-24B-Base-2503 (24B params, Apache 2.0)")
+        logger.info("Features: 128k context, vision capabilities, multilingual")
         logger.info("Quantization: 8-bit with nf4, bfloat16")
         
-        # Load model (customer's exact approach)
+        # Load model (using latest public Mistral Small 3.1)
+        model_name = "mistralai/Mistral-Small-3.1-24B-Base-2503"  # 24B params, Apache 2.0, public
+        
         model = AutoModelForCausalLM.from_pretrained(
-            "mistralai/Mistral-Small-24B-Instruct-2501",
+            model_name,
             device_map="auto",
             quantization_config=bnb_config,
         )
         
         # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained("mistralai/Mistral-Small-24B-Instruct-2501")
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
         
         # Create pipeline (customer's exact setup, but without streamer for API use)
         text_generation_pipeline = pipeline(
@@ -88,7 +91,7 @@ def load_model_once():
         
         # Store model info
         model_info = {
-            "model_name": "mistralai/Mistral-Small-24B-Instruct-2501",
+            "model_name": model_name,
             "quantized": True,
             "quantization_type": "8-bit nf4",
             "device_map": "auto",
