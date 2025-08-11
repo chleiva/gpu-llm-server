@@ -3,15 +3,13 @@
 OpenAI-compatible API server for gpt-oss-20b with MXFP4
 """
 
-from flask import Flask, request, jsonify, Response
-from transformers import pipeline, AutoTokenizer
+from flask import Flask, request, jsonify
+from transformers import pipeline
 import torch
 import json
 import time
 import uuid
 import argparse
-from threading import Thread
-from queue import Queue
 
 app = Flask(__name__)
 
@@ -22,23 +20,15 @@ model_id = "openai/gpt-oss-20b"
 def load_model():
     """Load the model with MXFP4"""
     global pipe
+    if pipe is not None:
+        return  # Already loaded
     print(f"Loading {model_id} with MXFP4...")
-    
-    # Load with left padding for decoder-only models
-    tokenizer = AutoTokenizer.from_pretrained(model_id)
-    tokenizer.padding_side = "left"  # Fix the padding warning
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    pipe = pipeline(
-        "text-generation", 
-        model=model_id, 
-        tokenizer=tokenizer,
-        torch_dtype="auto", 
-        device_map="auto"
-    )
+    pipe = pipeline("text-generation", model=model_id, torch_dtype="auto", device_map="auto")
     print(f"✅ Model loaded!")
     print(f"GPU memory used: {torch.cuda.memory_allocated(0)/1024**3:.2f} GB")
+
+# Load model immediately when module is imported (for gunicorn)
+load_model()
 
 @app.route('/v1/models', methods=['GET'])
 def list_models():
@@ -61,17 +51,54 @@ def chat_completions():
         messages = data.get('messages', [])
         max_tokens = data.get('max_tokens', 256)
         temperature = data.get('temperature', 0.7)
-        stream = data.get('stream', False)
         
         # Add reasoning level if specified
         reasoning = data.get('reasoning_level', 'medium')
         if not any(m.get('role') == 'system' for m in messages):
             messages.insert(0, {"role": "system", "content": f"Reasoning: {reasoning}"})
         
-        if stream:
-            return handle_streaming(messages, max_tokens, temperature)
-        else:
-            return handle_non_streaming(messages, max_tokens, temperature)
+        # Generate with pipeline
+        outputs = pipe(
+            messages,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            do_sample=True if temperature > 0 else False,
+            return_full_text=False
+        )
+        
+        # Extract response
+        response_text = outputs[0]["generated_text"]
+        if isinstance(response_text, list) and len(response_text) > 0:
+            response_text = response_text[-1].get("content", "")
+        elif isinstance(response_text, dict):
+            response_text = response_text.get("content", "")
+        
+        # Clean up harmony format if present
+        if "final" in response_text:
+            response_text = response_text.split("final", 1)[1].strip()
+        elif "assistant" in response_text:
+            response_text = response_text.split("assistant", 1)[1].strip()
+        
+        # Format OpenAI-style response
+        return jsonify({
+            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model_id,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_text
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": len(str(messages)),
+                "completion_tokens": len(response_text.split()),
+                "total_tokens": len(str(messages)) + len(response_text.split())
+            }
+        })
             
     except Exception as e:
         return jsonify({
@@ -81,144 +108,6 @@ def chat_completions():
                 "code": 500
             }
         }), 500
-
-def handle_non_streaming(messages, max_tokens, temperature):
-    """Handle non-streaming responses"""
-    # Use the correct autocast syntax for newer PyTorch
-    if torch.cuda.is_available():
-        with torch.amp.autocast('cuda', dtype=torch.float16):  # Fixed: Updated syntax
-            outputs = pipe(
-                messages,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-                do_sample=True if temperature > 0 else False,
-                return_full_text=False,
-                pad_token_id=pipe.tokenizer.eos_token_id  # Ensure proper padding
-            )
-    else:
-        # CPU fallback without autocast
-        outputs = pipe(
-            messages,
-            max_new_tokens=max_tokens,
-            temperature=temperature,
-            do_sample=True if temperature > 0 else False,
-            return_full_text=False,
-            pad_token_id=pipe.tokenizer.eos_token_id
-        )
-    
-    # Extract response
-    response_text = outputs[0]["generated_text"]
-    
-    # Handle the response format properly
-    if isinstance(response_text, str):
-        # Direct string response
-        pass
-    elif isinstance(response_text, list) and len(response_text) > 0:
-        # List of messages
-        if isinstance(response_text[-1], dict):
-            response_text = response_text[-1].get("content", "")
-        else:
-            response_text = str(response_text[-1])
-    elif isinstance(response_text, dict):
-        # Single message dict
-        response_text = response_text.get("content", "")
-    else:
-        response_text = str(response_text)
-    
-    # Clean up harmony format if present
-    if "final" in response_text:
-        response_text = response_text.split("final", 1)[1].strip()
-    elif "assistant" in response_text:
-        response_text = response_text.split("assistant", 1)[1].strip()
-    
-    # Format OpenAI-style response
-    return jsonify({
-        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
-        "object": "chat.completion",
-        "created": int(time.time()),
-        "model": model_id,
-        "choices": [{
-            "index": 0,
-            "message": {
-                "role": "assistant",
-                "content": response_text
-            },
-            "finish_reason": "stop"
-        }],
-        "usage": {
-            "prompt_tokens": len(str(messages)),
-            "completion_tokens": len(response_text.split()),
-            "total_tokens": len(str(messages)) + len(response_text.split())
-        }
-    })
-
-def handle_streaming(messages, max_tokens, temperature):
-    """Handle streaming responses"""
-    def generate():
-        # Use the correct autocast syntax
-        if torch.cuda.is_available():
-            with torch.amp.autocast('cuda', dtype=torch.float16):  # Fixed: Updated syntax
-                outputs = pipe(
-                    messages,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature,
-                    do_sample=True if temperature > 0 else False,
-                    return_full_text=False,
-                    pad_token_id=pipe.tokenizer.eos_token_id
-                )
-        else:
-            outputs = pipe(
-                messages,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-                do_sample=True if temperature > 0 else False,
-                return_full_text=False,
-                pad_token_id=pipe.tokenizer.eos_token_id
-            )
-        
-        response_text = outputs[0]["generated_text"]
-        
-        # Handle the response format properly
-        if isinstance(response_text, str):
-            pass
-        elif isinstance(response_text, list) and len(response_text) > 0:
-            if isinstance(response_text[-1], dict):
-                response_text = response_text[-1].get("content", "")
-            else:
-                response_text = str(response_text[-1])
-        elif isinstance(response_text, dict):
-            response_text = response_text.get("content", "")
-        else:
-            response_text = str(response_text)
-        
-        # Clean up
-        if "final" in response_text:
-            response_text = response_text.split("final", 1)[1].strip()
-        elif "assistant" in response_text:
-            response_text = response_text.split("assistant", 1)[1].strip()
-        
-        # Stream in chunks
-        chunk_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-        
-        # Initial chunk
-        yield f"data: {json.dumps({'id': chunk_id, 'choices': [{'delta': {'role': 'assistant'}}]})}\n\n"
-        
-        # Content chunks
-        words = response_text.split()
-        chunk_size = 5  # words per chunk
-        for i in range(0, len(words), chunk_size):
-            chunk_text = " ".join(words[i:i+chunk_size])
-            if i + chunk_size < len(words):
-                chunk_text += " "
-            
-            yield f"data: {json.dumps({'id': chunk_id, 'choices': [{'delta': {'content': chunk_text}}]})}\n\n"
-            time.sleep(0.01)  # Small delay for streaming effect
-        
-        # Final chunk
-        yield f"data: {json.dumps({'id': chunk_id, 'choices': [{'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
-        yield "data: [DONE]\n\n"
-    
-    return Response(generate(), mimetype='text/event-stream')
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -249,9 +138,7 @@ def index():
                 "model": model_id,
                 "messages": [{"role": "user", "content": "Hello!"}],
                 "max_tokens": 100,
-                "temperature": 0.7,
-                "stream": False,
-                "reasoning_level": "medium"
+                "temperature": 0.7
             }
         }
     })
