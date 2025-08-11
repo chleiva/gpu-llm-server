@@ -1,7 +1,0 @@
-{
-    "model_path": "./models/mistral-small-3.2-24b-instruct-2506-q8_0.gguf",
-    "n_gpu_layers": -1,
-    "n_ctx": 8192,
-    "n_batch": 512,
-    "verbose": false
-  }
