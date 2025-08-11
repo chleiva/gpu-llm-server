@@ -1,205 +1,350 @@
+#!/usr/bin/env python3
+"""
+Script to download and quantize Mistral-Small-3.1-24B-Base-2503 model to 8-bit
+Compatible with Hugging Face Transformers library
+"""
+
 import os
+import sys
 import torch
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline, BitsAndBytesConfig
-import logging
-from typing import Optional
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import argparse
+from pathlib import Path
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+def check_transformers_version():
+    """Check and report transformers version"""
+    import transformers
+    print(f"Current transformers version: {transformers.__version__}")
+    return transformers.__version__
 
-# Request/Response models
-class InferenceRequest(BaseModel):
-    prompt: str
-    max_tokens: int = Field(default=1000, ge=1, le=4096)
-    temperature: float = Field(default=0.1, ge=0.0, le=2.0)
-    top_p: float = Field(default=0.5, ge=0.0, le=1.0)
-    repetition_penalty: float = Field(default=1.1, ge=1.0, le=2.0)
-
-class InferenceResponse(BaseModel):
-    response: str
-    model_info: dict
-
-class ModelInfo(BaseModel):
-    model_name: str
-    quantized: bool
-    device_map: str
-    local_files_only: bool
-
-# Global variables (loaded once at startup)
-model = None
-tokenizer = None
-text_generation_pipeline = None
-model_info = {}
-
-def load_model_once():
-    """Load model once at startup - using customer's exact approach"""
-    global model, tokenizer, text_generation_pipeline, model_info
+def download_and_quantize_model(
+    model_id="mistralai/Mistral-Small-3.1-24B-Base-2503",
+    output_dir="./mistral-small-8bit",
+    cache_dir=None,
+    use_auth_token=None
+):
+    """
+    Download and quantize the Mistral model to 8-bit format
     
-    if model is not None:
-        logger.info("Model already loaded, skipping...")
-        return
+    Args:
+        model_id: Hugging Face model ID
+        output_dir: Directory to save the quantized model
+        cache_dir: Optional cache directory for downloads
+        use_auth_token: Optional Hugging Face auth token
+    """
     
-    logger.info("Starting model loading...")
-    logger.info("Using customer's proven configuration")
+    print(f"Starting download and quantization of {model_id}")
+    print(f"Output directory: {output_dir}")
+    
+    # Check transformers version
+    check_transformers_version()
+    
+    # Create output directory
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Configure 8-bit quantization
+    quantization_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        bnb_8bit_compute_dtype=torch.float16,
+        bnb_8bit_quant_type="nf8",
+        bnb_8bit_use_double_quant=True
+    )
+    
+    print("\n1. Downloading tokenizer...")
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            cache_dir=cache_dir,
+            use_auth_token=use_auth_token,
+            trust_remote_code=True  # Essential for Mistral 3 models
+        )
+    except Exception as e:
+        print(f"Error downloading tokenizer: {e}")
+        print("\nTrying with legacy option...")
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_id,
+            cache_dir=cache_dir,
+            use_auth_token=use_auth_token,
+            use_fast=True
+        )
+    
+    print("\n2. Downloading and quantizing model to 8-bit...")
+    print("Note: This will take time and requires significant RAM during the process")
+    print("Using trust_remote_code=True for Mistral 3 architecture support")
     
     try:
-        # Quantization config (exactly as customer's)
-        use_8bit = True
-        bnb_8bit_compute_dtype = torch.bfloat16
-        bnb_8bit_quant_type = "nf4"
-        use_nested_quant = True
-        
-        bnb_config = BitsAndBytesConfig(
-            load_in_8bit=use_8bit,
-            bnb_8bit_quant_type=bnb_8bit_quant_type,
-            bnb_8bit_compute_dtype=bnb_8bit_compute_dtype,
-            bnb_8bit_use_double_quant=use_nested_quant,
+        # First attempt: Load with trust_remote_code for Mistral 3 support
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            quantization_config=quantization_config,
+            device_map="auto",
+            cache_dir=cache_dir,
+            use_auth_token=use_auth_token,
+            trust_remote_code=True,  # This is crucial for Mistral 3
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True
         )
         
-        logger.info("Loading YOUR local GGUF model: mistral-small-3.2-24b-instruct-2506-q8_0.gguf")
-        logger.info("Using Transformers with local GGUF file support")
+    except ValueError as ve:
+        print(f"error: {ve}")
+
+
+        if "Mistral3Config" in str(ve):
+            print("\n⚠️  Mistral 3 architecture not supported in current transformers version")
+            print("Attempting alternative loading method...")
+            
+            # Alternative: Try loading as a generic model
+            try:
+                from transformers import AutoConfig
+                
+                # Download config first
+                config = AutoConfig.from_pretrained(
+                    model_id,
+                    cache_dir=cache_dir,
+                    use_auth_token=use_auth_token,
+                    trust_remote_code=True
+                )
+                
+                # Try to load as MistralForCausalLM (fallback to Mistral v1/v2 architecture)
+                from transformers import MistralForCausalLM
+                
+                model = MistralForCausalLM.from_pretrained(
+                    model_id,
+                    config=config,
+                    quantization_config=quantization_config,
+                    device_map="auto",
+                    cache_dir=cache_dir,
+                    use_auth_token=use_auth_token,
+                    trust_remote_code=True,
+                    torch_dtype=torch.float16,
+                    low_cpu_mem_usage=True,
+                    ignore_mismatched_sizes=True
+                )
+                
+            except Exception as e2:
+                print(f"\n✗ Alternative loading failed: {str(e2)}")
+                print("\n" + "="*60)
+                print("SOLUTION OPTIONS:")
+                print("="*60)
+                print("\n1. Update transformers to the latest version:")
+                print("   pip install --upgrade transformers")
+                print("\n2. Install from source for latest Mistral 3 support:")
+                print("   pip install git+https://github.com/huggingface/transformers.git")
+                print("\n3. Use the model with remote code execution:")
+                print("   The model requires trust_remote_code=True which we've already set.")
+                print("\n4. Alternative: Use an older Mistral model that's fully supported:")
+                print("   - mistralai/Mistral-7B-v0.1")
+                print("   - mistralai/Mixtral-8x7B-v0.1")
+                print("\nPlease upgrade transformers and try again.")
+                sys.exit(1)
+        else:
+            raise ve
+    
+    print("\n3. Saving quantized model and tokenizer...")
+    
+    # Save the quantized model
+    model.save_pretrained(
+        output_dir,
+        safe_serialization=True,
+        max_shard_size="5GB"
+    )
+    
+    # Save the tokenizer
+    tokenizer.save_pretrained(output_dir)
+    
+    # Save a config file to indicate this is a quantized model
+    import json
+    quantization_info = {
+        "quantization": "8bit",
+        "original_model": model_id,
+        "quantization_config": {
+            "load_in_8bit": True,
+            "bnb_8bit_compute_dtype": "float16",
+            "bnb_8bit_quant_type": "nf8",
+            "bnb_8bit_use_double_quant": True
+        }
+    }
+    
+    with open(os.path.join(output_dir, "quantization_config.json"), "w") as f:
+        json.dump(quantization_info, f, indent=2)
+    
+    print(f"\n✓ Successfully quantized and saved model to {output_dir}")
+    
+    # Print model size information
+    total_size = sum(
+        os.path.getsize(os.path.join(output_dir, f))
+        for f in os.listdir(output_dir)
+        if os.path.isfile(os.path.join(output_dir, f))
+    ) / (1024**3)
+    
+    print(f"Total size of quantized model: {total_size:.2f} GB")
+    
+    return model, tokenizer
+
+def test_quantized_model(model_dir="./mistral-small-8bit"):
+    """
+    Test loading and using the quantized model with transformers
+    """
+    print("\n" + "="*50)
+    print("Testing quantized model loading...")
+    
+    try:
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_dir,
+            trust_remote_code=True
+        )
         
-        # Load YOUR local GGUF model with Transformers
-        model_path = "./models"
-        gguf_filename = "mistral-small-3.2-24b-instruct-2506-q8_0.gguf"
-        
-        # First install gguf if needed
-        try:
-            import gguf
-        except ImportError:
-            logger.info("Installing gguf package...")
-            import subprocess
-            subprocess.check_call(["pip", "install", "gguf"])
+        # For loading the saved 8-bit model
+        quantization_config = BitsAndBytesConfig(
+            load_in_8bit=True,
+            bnb_8bit_compute_dtype=torch.float16
+        )
         
         model = AutoModelForCausalLM.from_pretrained(
-            model_path,
-            gguf_file=gguf_filename,
+            model_dir,
+            quantization_config=quantization_config,
             device_map="auto",
-            torch_dtype=torch.bfloat16,
-            local_files_only=True
+            trust_remote_code=True,
+            torch_dtype=torch.float16
         )
         
-        # Load tokenizer - might need to use a compatible one
-        tokenizer = AutoTokenizer.from_pretrained(
-            "mistralai/Mistral-7B-Instruct-v0.3",  # Compatible tokenizer
-            local_files_only=False
-        )
+        # Test inference
+        test_prompt = "The capital of France is"
+        inputs = tokenizer(test_prompt, return_tensors="pt")
         
-        # Create pipeline (customer's exact setup, but without streamer for API use)
-        text_generation_pipeline = pipeline(
-            model=model,
-            tokenizer=tokenizer,
-            task="text-generation",
-            temperature=0.1,
-            top_p=0.5,
-            repetition_penalty=1.1,
-            return_full_text=False,  # Changed to False for API responses
-            max_new_tokens=1000, 
-            do_sample=True,
-            # Note: Removed streamer for API use
-        )
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=10,
+                temperature=0.7,
+                do_sample=True
+            )
         
-        # Store model info
-        model_info = {
-            "model_name": model_name,
-            "quantized": True,
-            "quantization_type": "8-bit nf4",
-            "device_map": "auto",
-            "local_files_only": False,
-            "compute_dtype": str(bnb_8bit_compute_dtype)
-        }
-        
-        logger.info("Model loaded successfully!")
-        logger.info(f"Model info: {model_info}")
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        print(f"\nTest prompt: {test_prompt}")
+        print(f"Model response: {response}")
+        print("\n✓ Model loaded and working correctly!")
         
     except Exception as e:
-        logger.error(f"Failed to load model: {e}")
+        print(f"\n✗ Error testing model: {str(e)}")
         raise
 
-# FastAPI app
-app = FastAPI(
-    title="Mistral LLM Inference API",
-    description="FastAPI service using customer's proven Transformers approach",
-    version="1.0.0"
-)
-
-@app.on_event("startup")
-async def startup_event():
-    """Load model on startup"""
-    load_model_once()
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy", 
-        "model_loaded": model is not None,
-        "model_info": model_info
+def check_requirements():
+    """Check system requirements and installed packages"""
+    print("Checking system requirements...")
+    print("="*50)
+    
+    # Check Python version
+    python_version = sys.version_info
+    print(f"Python version: {python_version.major}.{python_version.minor}.{python_version.micro}")
+    
+    # Check installed packages
+    packages = {
+        "torch": None,
+        "transformers": None,
+        "accelerate": None,
+        "bitsandbytes": None
     }
-
-@app.get("/model-info", response_model=ModelInfo)
-async def get_model_info():
-    """Get model information"""
-    if not model_info:
-        raise HTTPException(status_code=503, detail="Model not loaded")
     
-    return ModelInfo(
-        model_name=model_info["model_name"],
-        quantized=model_info["quantized"],
-        device_map=model_info["device_map"],
-        local_files_only=model_info["local_files_only"]
-    )
-
-@app.post("/inference", response_model=InferenceResponse)
-async def inference(request: InferenceRequest):
-    """Inference endpoint using customer's pipeline approach"""
-    if text_generation_pipeline is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
+    for package in packages:
+        try:
+            module = __import__(package)
+            if hasattr(module, "__version__"):
+                packages[package] = module.__version__
+                print(f"{package}: {module.__version__}")
+            else:
+                packages[package] = "installed"
+                print(f"{package}: installed")
+        except ImportError:
+            packages[package] = "NOT INSTALLED"
+            print(f"{package}: NOT INSTALLED ⚠️")
     
-    try:
-        logger.info(f"Processing inference request: {request.prompt[:50]}...")
-        
-        # Update pipeline parameters for this request
-        text_generation_pipeline.task_kwargs.update({
-            "max_new_tokens": request.max_tokens,
-            "temperature": request.temperature,
-            "top_p": request.top_p,
-            "repetition_penalty": request.repetition_penalty,
-        })
-        
-        # Generate response using customer's pipeline
-        outputs = text_generation_pipeline(request.prompt)
-        
-        # Extract the generated text
-        if isinstance(outputs, list) and len(outputs) > 0:
-            response_text = outputs[0]["generated_text"].strip()
+    # Check CUDA availability
+    if packages["torch"] != "NOT INSTALLED":
+        import torch
+        if torch.cuda.is_available():
+            print(f"\nCUDA available: Yes")
+            print(f"CUDA version: {torch.version.cuda}")
+            print(f"GPU devices: {torch.cuda.device_count()}")
+            for i in range(torch.cuda.device_count()):
+                print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
         else:
-            response_text = str(outputs).strip()
-        
-        logger.info(f"Generated response length: {len(response_text)} chars")
-        
-        return InferenceResponse(
-            response=response_text,
-            model_info=model_info
-        )
+            print("\nCUDA available: No ⚠️")
     
-    except Exception as e:
-        logger.error(f"Inference error: {e}")
-        raise HTTPException(status_code=500, detail=f"Inference failed: {str(e)}")
+    print("="*50)
+    
+    # Check for required packages
+    missing = [pkg for pkg, ver in packages.items() if ver == "NOT INSTALLED"]
+    if missing:
+        print("\n⚠️  Missing required packages:", ", ".join(missing))
+        print("\nInstall with:")
+        print("pip install torch transformers accelerate bitsandbytes")
+        return False
+    
+    return True
 
-@app.get("/")
-async def root():
-    """Root endpoint with service info"""
-    return {
-        "service": "Mistral LLM Inference API",
-        "status": "running",
-        "model_loaded": model is not None,
-        "endpoints": ["/health", "/model-info", "/inference"]
-    }
+def main():
+    parser = argparse.ArgumentParser(
+        description="Download and quantize Mistral-Small-3.1-24B model to 8-bit"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./mistral-small-8bit",
+        help="Directory to save the quantized model"
+    )
+    parser.add_argument(
+        "--cache-dir",
+        type=str,
+        default=None,
+        help="Cache directory for downloads"
+    )
+    parser.add_argument(
+        "--hf-token",
+        type=str,
+        default=None,
+        help="Hugging Face authentication token (if needed)"
+    )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Test the quantized model after saving"
+    )
+    parser.add_argument(
+        "--test-only",
+        action="store_true",
+        help="Only test an existing quantized model"
+    )
+    parser.add_argument(
+        "--check-only",
+        action="store_true",
+        help="Only check system requirements"
+    )
+    
+    args = parser.parse_args()
+    
+    if args.check_only:
+        check_requirements()
+        sys.exit(0)
+    
+    # Always check requirements first
+    if not check_requirements():
+        sys.exit(1)
+    
+    if args.test_only:
+        test_quantized_model(args.output_dir)
+    else:
+        # Download and quantize
+        model, tokenizer = download_and_quantize_model(
+            output_dir=args.output_dir,
+            cache_dir=args.cache_dir,
+            use_auth_token=args.hf_token
+        )
+        
+        # Test if requested
+        if args.test:
+            test_quantized_model(args.output_dir)
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    main()
