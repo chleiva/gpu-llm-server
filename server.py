@@ -67,7 +67,7 @@ class OptimizedModel:
             device_map="auto",
             low_cpu_mem_usage=True,
             use_cache=True,  # Enable KV cache
-            attn_implementation="flash_attention_2" if torch.cuda.is_available() else "eager"
+            attn_implementation="sdpa"
         )
         
         # Enable torch compile for additional speedup (PyTorch 2.0+)
