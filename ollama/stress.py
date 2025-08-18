@@ -157,4 +157,24 @@ async def main():
     parser = argparse.ArgumentParser(description='Stress test the LLM API')
     parser.add_argument('-n', '--num-requests', type=int, default=20,
                         help='Total number of requests to make')
-    parser.add_argument('-c',
+    parser.add_argument('-c', '--concurrent', type=int, default=5,
+                        help='Number of concurrent requests')
+    parser.add_argument('-t', '--tokens', type=int, default=100,
+                        help='Max tokens per request')
+    parser.add_argument('-u', '--url', type=str, 
+                        default='http://localhost:8000/v1/generate',
+                        help='API endpoint URL')
+    
+    args = parser.parse_args()
+    
+    tester = StressTest(
+        url=args.url,
+        num_requests=args.num_requests,
+        concurrent_requests=args.concurrent,
+        max_tokens=args.tokens
+    )
+    
+    await tester.run_test()
+
+if __name__ == "__main__":
+    asyncio.run(main())
