@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import requests
 import json
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import logging
 import uvicorn
 import os
@@ -27,6 +27,24 @@ class GenerateRequest(BaseModel):
     presence_penalty: Optional[float] = 0
     frequency_penalty: Optional[float] = 0
     stop: Optional[list] = None
+
+# OpenAI-compatible chat models
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatCompletionRequest(BaseModel):
+    model: Optional[str] = "gpt-oss:20b"
+    messages: List[ChatMessage]
+    max_tokens: Optional[int] = 2048
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 0.9
+    top_k: Optional[int] = 40
+    repeat_penalty: Optional[float] = 1.1
+    presence_penalty: Optional[float] = 0
+    frequency_penalty: Optional[float] = 0
+    stop: Optional[List[str]] = None
+    stream: Optional[bool] = False
 
 # Get Ollama host from environment or default to localhost
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "localhost")
@@ -71,6 +89,52 @@ def format_response(response_data: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
 
+def format_chat_response(response_data: Dict[str, Any], request_id: str = None) -> Dict[str, Any]:
+    """Format the response from Ollama to match OpenAI's chat completion format."""
+    import time
+    
+    return {
+        "id": request_id or f"chatcmpl-{int(time.time())}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": response_data.get("model", MODEL_NAME),
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_data.get("response", "")
+                },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": {
+            "prompt_tokens": response_data.get("prompt_eval_count", 0),
+            "completion_tokens": response_data.get("eval_count", 0),
+            "total_tokens": response_data.get("prompt_eval_count", 0) + response_data.get("eval_count", 0)
+        }
+    }
+
+def messages_to_prompt(messages: List[ChatMessage], system_prompt: Optional[str] = None) -> tuple[str, Optional[str]]:
+    """Convert OpenAI-style messages to a prompt string for Ollama."""
+    system = system_prompt
+    prompt_parts = []
+    
+    for message in messages:
+        if message.role == "system":
+            system = message.content
+        elif message.role == "user":
+            prompt_parts.append(f"User: {message.content}")
+        elif message.role == "assistant":
+            prompt_parts.append(f"Assistant: {message.content}")
+    
+    # Add final prompt indicator
+    prompt = "\n\n".join(prompt_parts)
+    if prompt_parts and not prompt.endswith("Assistant:"):
+        prompt += "\n\nAssistant:"
+    
+    return prompt, system
+
 @app.on_event("startup")
 async def startup_event():
     """Check Ollama availability on startup."""
@@ -84,6 +148,78 @@ async def startup_event():
         logger.error(f"3. ollama pull {MODEL_NAME}")
         # Don't exit - allow the server to start anyway but endpoints will fail
         # This allows the health check endpoint to provide status
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: ChatCompletionRequest, background_tasks: BackgroundTasks):
+    """
+    OpenAI-compatible chat completions endpoint using Ollama.
+    """
+    try:
+        # Convert messages to prompt format
+        prompt, system = messages_to_prompt(request.messages)
+        
+        # Prepare the request payload with optimized settings
+        payload = {
+            "model": request.model or MODEL_NAME,
+            "prompt": prompt,
+            "options": {
+                "num_predict": request.max_tokens,
+                "temperature": request.temperature,
+                "top_p": request.top_p,
+                "top_k": request.top_k,
+                "repeat_penalty": request.repeat_penalty,
+                "presence_penalty": request.presence_penalty,
+                "frequency_penalty": request.frequency_penalty,
+                "stop": request.stop or []
+            },
+            "stream": False
+        }
+
+        # Add system prompt if provided
+        if system:
+            payload["system"] = system
+
+        logger.info(f"Sending chat request to Ollama API for model {request.model or MODEL_NAME}")
+        
+        # Make request to Ollama API
+        response = http.post(
+            f"{OLLAMA_API_BASE}/generate",
+            json=payload,
+            timeout=60
+        )
+        response.raise_for_status()
+        
+        # Parse and format response
+        response_data = response.json()
+        formatted_response = format_chat_response(response_data)
+        
+        # Log completion for monitoring
+        background_tasks.add_task(
+            logger.info,
+            f"Generated {formatted_response['usage']['completion_tokens']} tokens for chat completion"
+        )
+        
+        return formatted_response
+
+    except requests.RequestException as e:
+        logger.error(f"Ollama API error: {str(e)}")
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Error communicating with Ollama API: {str(e)}\n"
+                f"Please ensure Ollama is running at {OLLAMA_API_BASE}\n"
+                "Installation instructions:\n"
+                "1. curl -fsSL https://ollama.com/install.sh | sh\n"
+                "2. systemctl start ollama (or 'ollama serve' if not using systemd)\n"
+                f"3. ollama pull {request.model or MODEL_NAME}"
+            )
+        )
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error: {str(e)}"
+        )
 
 @app.post("/v1/generate")
 async def generate(request: GenerateRequest, background_tasks: BackgroundTasks):
@@ -192,6 +328,21 @@ async def health_check():
                    "1. curl -fsSL https://ollama.com/install.sh | sh\n"
                    "2. systemctl start ollama (or 'ollama serve' if not using systemd)"
         }
+
+# Add a root endpoint for basic API info
+@app.get("/")
+async def root():
+    """Root endpoint with API information."""
+    return {
+        "name": "Ollama GPU Server",
+        "version": "1.0.0",
+        "endpoints": {
+            "chat_completions": "/v1/chat/completions",
+            "generate": "/v1/generate",
+            "health": "/health"
+        },
+        "openai_compatible": True
+    }
 
 if __name__ == "__main__":
     uvicorn.run(
