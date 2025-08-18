@@ -195,4 +195,43 @@ class LargeContextStressTest:
         with open('large_context_results.json', 'w') as f:
             json.dump({
                 'summary': {
-                    'total_duration': total_du
+                    'total_duration': total_duration,
+                    'num_requests': self.num_requests,
+                    'concurrent_requests': self.concurrent_requests,
+                    'target_input_tokens': self.input_tokens,
+                    'successful': len(self.results),
+                    'failed': len(self.errors)
+                },
+                'results': self.results,
+                'errors': self.errors
+            }, f, indent=2)
+        
+        print(f"\nDetailed results saved to large_context_results.json")
+
+async def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Stress test with large input context')
+    parser.add_argument('-n', '--num-requests', type=int, default=5,
+                        help='Number of requests (default: 5)')
+    parser.add_argument('-c', '--concurrent', type=int, default=2,
+                        help='Concurrent requests (default: 2)')
+    parser.add_argument('-i', '--input-tokens', type=int, default=10000,
+                        help='Input tokens per request (default: 10000)')
+    parser.add_argument('-o', '--output-tokens', type=int, default=200,
+                        help='Max output tokens per request (default: 200)')
+    
+    args = parser.parse_args()
+    
+    tester = LargeContextStressTest(
+        url='http://localhost:8000/v1/generate',
+        num_requests=args.num_requests,
+        concurrent_requests=args.concurrent,
+        input_tokens=args.input_tokens,
+        output_tokens=args.output_tokens
+    )
+    
+    await tester.run_test()
+
+if __name__ == "__main__":
+    asyncio.run(main())
