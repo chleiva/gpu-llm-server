@@ -18,61 +18,47 @@ class LargeContextStressTest:
     def generate_large_prompt(self, token_count):
         """Generate a prompt with approximately the specified number of tokens"""
         # Rough estimate: 1 token ≈ 4 characters, so we need ~40,000 characters for 10k tokens
-        # Average word is ~5 characters, so ~1.25 tokens per word
         
-        base_text = """The following is a comprehensive analysis of various technological advances 
-        and their implications for society, economics, and human development. 
-        This document explores multiple dimensions of progress across different fields including 
-        artificial intelligence, quantum computing, biotechnology, renewable energy, space exploration, 
-        nanotechnology, robotics, telecommunications, and material science. 
-        Each section provides detailed examination of current state, future projections, 
-        challenges, opportunities, and interdisciplinary connections. """
+        base_text = "The following is a comprehensive analysis of various technological advances and their implications for society, economics, and human development. This document explores multiple dimensions of progress across different fields including artificial intelligence, quantum computing, biotechnology, renewable energy, space exploration, nanotechnology, robotics, telecommunications, and material science. Each section provides detailed examination of current state, future projections, challenges, opportunities, and interdisciplinary connections. "
         
-        # Create a large context by repeating and varying content
+        # Create sections to build large context
         sections = [
-            "In the field of artificial intelligence, we observe rapid advancement in neural network architectures, 
-            transformer models, and multimodal learning systems. The implications extend beyond mere automation 
-            to fundamental changes in how we process information, make decisions, and understand intelligence itself. ",
+            "In the field of artificial intelligence, we observe rapid advancement in neural network architectures, transformer models, and multimodal learning systems. The implications extend beyond mere automation to fundamental changes in how we process information, make decisions, and understand intelligence itself. Recent developments in large language models demonstrate unprecedented capabilities in natural language understanding, generation, and reasoning. ",
             
-            "Quantum computing represents a paradigm shift in computational capabilities, offering exponential 
-            speedup for certain problem classes. Current developments in quantum error correction, qubit coherence, 
-            and quantum algorithms suggest we are approaching practical quantum advantage for real-world applications. ",
+            "Quantum computing represents a paradigm shift in computational capabilities, offering exponential speedup for certain problem classes. Current developments in quantum error correction, qubit coherence, and quantum algorithms suggest we are approaching practical quantum advantage for real-world applications. Major corporations and research institutions are investing billions in quantum research, with breakthroughs in quantum supremacy already demonstrated. ",
             
-            "Biotechnology continues to revolutionize medicine through gene therapy, CRISPR technology, and 
-            synthetic biology. The convergence of computational biology and laboratory techniques enables 
-            unprecedented precision in understanding and manipulating biological systems. ",
+            "Biotechnology continues to revolutionize medicine through gene therapy, CRISPR technology, and synthetic biology. The convergence of computational biology and laboratory techniques enables unprecedented precision in understanding and manipulating biological systems. Personalized medicine, based on individual genetic profiles, is becoming increasingly accessible and effective. ",
             
-            "The renewable energy sector demonstrates remarkable cost reductions and efficiency improvements 
-            in solar photovoltaics, wind turbines, and energy storage systems. Grid integration challenges 
-            and intermittency issues are being addressed through smart grid technologies and advanced forecasting. ",
+            "The renewable energy sector demonstrates remarkable cost reductions and efficiency improvements in solar photovoltaics, wind turbines, and energy storage systems. Grid integration challenges and intermittency issues are being addressed through smart grid technologies and advanced forecasting. Battery technology advances are making electric vehicles and grid-scale storage increasingly viable. ",
             
-            "Space exploration enters a new era with commercial spaceflight, asteroid mining prospects, and 
-            Mars colonization plans. The reduction in launch costs and development of reusable rockets 
-            fundamentally changes the economics of space access. ",
+            "Space exploration enters a new era with commercial spaceflight, asteroid mining prospects, and Mars colonization plans. The reduction in launch costs and development of reusable rockets fundamentally changes the economics of space access. Private companies are now leading innovation in space technology, with ambitious plans for lunar bases and Mars settlements. ",
+            
+            "Nanotechnology applications span from medicine to materials science, enabling targeted drug delivery, self-healing materials, and ultra-efficient catalysts. The manipulation of matter at the atomic and molecular scale opens possibilities previously confined to science fiction. Carbon nanotubes and graphene continue to reveal remarkable properties with wide-ranging applications. ",
+            
+            "Robotics and automation are transforming manufacturing, logistics, healthcare, and service industries. Advanced sensors, machine learning algorithms, and improved actuators enable robots to perform increasingly complex tasks with greater autonomy. Collaborative robots (cobots) are designed to work alongside humans safely and efficiently. ",
+            
+            "Telecommunications infrastructure evolves with 5G deployment and early 6G research, enabling unprecedented connectivity and data transfer rates. The Internet of Things (IoT) connects billions of devices, creating vast networks of interconnected sensors and actuators. Edge computing brings processing power closer to data sources, reducing latency and bandwidth requirements. ",
+            
+            "Advanced materials science produces metamaterials with properties not found in nature, shape-memory alloys, and ultra-strong composites. These materials enable new possibilities in aerospace, construction, electronics, and medicine. 3D printing technology allows for complex geometries and customized material properties. ",
+            
+            "Fusion energy research progresses toward achieving net energy gain, with several experimental reactors showing promising results. If successful, fusion could provide virtually limitless clean energy, fundamentally transforming global energy systems. Recent breakthroughs in magnetic confinement and inertial fusion bring commercial fusion power closer to reality. "
         ]
         
-        # Build the large prompt
+        # Build the large prompt by repeating sections
         large_prompt = base_text
+        word_count = len(base_text.split())
+        estimated_tokens = word_count * 1.3  # Rough token estimate
         
-        # Repeat sections to reach target token count
-        # Roughly 750 tokens per full cycle through sections
-        estimated_tokens = 0
-        word_count = 0
-        
+        # Keep adding sections until we reach target token count
+        section_index = 0
         while estimated_tokens < token_count:
-            for section in sections:
-                large_prompt += section
-                word_count += len(section.split())
-                estimated_tokens = word_count * 1.25  # Rough token estimate
-                
-                if estimated_tokens >= token_count:
-                    break
+            large_prompt += sections[section_index % len(sections)]
+            word_count = len(large_prompt.split())
+            estimated_tokens = word_count * 1.3
+            section_index += 1
         
         # Add a specific question at the end
-        large_prompt += f"\n\nGiven this extensive context of approximately {self.input_tokens} tokens, "
-        large_prompt += "please provide a comprehensive summary that identifies the three most important "
-        large_prompt += "technological trends and their potential convergence points. Focus on practical "
-        large_prompt += "implications for the next decade."
+        large_prompt += f"\n\nGiven this extensive context of approximately {self.input_tokens} tokens, please provide a comprehensive summary that identifies the three most important technological trends and their potential convergence points. Focus on practical implications for the next decade."
         
         return large_prompt
     
@@ -89,8 +75,7 @@ class LargeContextStressTest:
             "top_p": 0.9
         }
         
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] Request {request_id}: "
-              f"Sending ~{self.input_tokens} input tokens...")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Request {request_id}: Sending ~{self.input_tokens} input tokens...")
         
         start_time = time.time()
         try:
@@ -114,9 +99,7 @@ class LargeContextStressTest:
                     'status': response.status
                 })
                 
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] Request {request_id} completed: "
-                      f"{duration:.2f}s, Input: {input_tokens}, Output: {output_tokens}, "
-                      f"Speed: {tokens_per_second:.2f} tok/s")
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Request {request_id} completed: {duration:.2f}s, Input: {input_tokens}, Output: {output_tokens}, Speed: {tokens_per_second:.2f} tok/s")
                 
                 return True
         except asyncio.TimeoutError:
@@ -212,43 +195,4 @@ class LargeContextStressTest:
         with open('large_context_results.json', 'w') as f:
             json.dump({
                 'summary': {
-                    'total_duration': total_duration,
-                    'num_requests': self.num_requests,
-                    'concurrent_requests': self.concurrent_requests,
-                    'target_input_tokens': self.input_tokens,
-                    'successful': len(self.results),
-                    'failed': len(self.errors)
-                },
-                'results': self.results,
-                'errors': self.errors
-            }, f, indent=2)
-        
-        print(f"\nDetailed results saved to large_context_results.json")
-
-async def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Stress test with large input context')
-    parser.add_argument('-n', '--num-requests', type=int, default=5,
-                        help='Number of requests (default: 5)')
-    parser.add_argument('-c', '--concurrent', type=int, default=2,
-                        help='Concurrent requests (default: 2)')
-    parser.add_argument('-i', '--input-tokens', type=int, default=10000,
-                        help='Input tokens per request (default: 10000)')
-    parser.add_argument('-o', '--output-tokens', type=int, default=200,
-                        help='Max output tokens per request (default: 200)')
-    
-    args = parser.parse_args()
-    
-    tester = LargeContextStressTest(
-        url='http://localhost:8000/v1/generate',
-        num_requests=args.num_requests,
-        concurrent_requests=args.concurrent,
-        input_tokens=args.input_tokens,
-        output_tokens=args.output_tokens
-    )
-    
-    await tester.run_test()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+                    'total_duration': total_du
