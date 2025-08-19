@@ -16,10 +16,11 @@ from pathlib import Path
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,  # Changed to WARNING to reduce noise
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # Keep logger at INFO for important messages
 
 # Create logs directory if it doesn't exist
 LOGS_DIR = Path("logs")
@@ -96,7 +97,7 @@ def create_log_entry(
         },
         "messages": messages,
         "prompt": prompt,
-        "response": response,
+        "model_response": response,  # Changed from "response" to "model_response" for clarity
         "error": error
     }
 
@@ -110,7 +111,7 @@ def write_log_entry(log_entry: Dict[str, Any]):
         with open(log_filepath, "a", encoding="utf-8") as f:
             f.write(json.dumps(log_entry, indent=2, ensure_ascii=False))
             f.write("\n" + "="*80 + "\n\n")
-        logger.info(f"Log written to: {log_filepath}")
+        # Removed verbose logging
     except Exception as e:
         logger.error(f"Failed to write log: {str(e)}")
 
@@ -121,15 +122,9 @@ def print_request_summary(
     latency: float,
     status: str = "success"
 ):
-    """Print formatted summary to console."""
-    print("\n" + "="*60)
-    print(f"Request ID: {request_id}")
-    print(f"Status: {status}")
-    print(f"Tokens In: {prompt_tokens}")
-    print(f"Tokens Out: {completion_tokens}")
-    print(f"Total Tokens: {prompt_tokens + completion_tokens}")
-    print(f"Latency: {latency:.3f} seconds")
-    print("="*60 + "\n")
+    """Print minimal summary to console."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{timestamp} | in: {prompt_tokens} | out: {completion_tokens} | latency: {latency:.3f}s")
 
 def wait_for_ollama(timeout=60):
     """Wait for Ollama service to be available."""
@@ -239,7 +234,7 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
         if system_prompt:
             payload["system"] = system_prompt
         
-        logger.info(f"Request {request_id}: Sending to Ollama API for model {MODEL_NAME}")
+        # Removed verbose logging
         
         # Make request to Ollama API
         response = http.post(
@@ -261,11 +256,11 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
         completion_tokens = int(ollama_response.get("eval_count", len(generated_text.split()) * 1.3))
         total_tokens = prompt_tokens + completion_tokens
         
-        # Create log entry
+        # Create log entry - using the raw generated_text, not stripped
         log_entry = create_log_entry(
             request_id=request_id,
             prompt=prompt,
-            response=generated_text,
+            response=generated_text,  # Keep the full response text
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
