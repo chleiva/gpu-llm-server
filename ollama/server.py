@@ -80,7 +80,7 @@ def create_log_entry(
     timestamp: datetime,
     status: str = "success",
     error: str = None,
-    reasoning_effort: str = "low"  # NEW: log it
+    reasoning_effort: str = "medium"  # NEW: log it
 ) -> Dict[str, Any]:
     """Create a structured log entry."""
     return {
@@ -161,9 +161,9 @@ def messages_to_prompt(messages: List[Dict[str, str]]) -> tuple[str, str]:
     return prompt, system_prompt
 
 def normalize_reasoning_effort(val: Optional[str]) -> str:
-    """Validate and normalize reasoning_effort, default to 'low'."""
+    """Validate and normalize reasoning_effort, default to 'medium'."""
     if val is None:
-        return "low"
+        return "medium"
     v = str(val).strip().lower()
     if v not in {"low", "medium", "high"}:
         raise HTTPException(
