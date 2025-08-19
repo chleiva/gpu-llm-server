@@ -12,10 +12,18 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from datetime import datetime
 import uuid
+from pathlib import Path
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Create logs directory if it doesn't exist
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="GPT-OSS-20B API Server (MXFP4)", version="1.0.0")
 
@@ -53,6 +61,75 @@ adapter = HTTPAdapter(max_retries=retry_strategy)
 http = requests.Session()
 http.mount("http://", adapter)
 http.mount("https://", adapter)
+
+def create_log_entry(
+    request_id: str,
+    prompt: str,
+    response: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    total_tokens: int,
+    latency: float,
+    model: str,
+    temperature: float,
+    max_tokens: int,
+    messages: List[Dict[str, str]],
+    timestamp: datetime,
+    status: str = "success",
+    error: str = None
+) -> Dict[str, Any]:
+    """Create a structured log entry."""
+    return {
+        "request_id": request_id,
+        "timestamp": timestamp.isoformat(),
+        "model": model,
+        "status": status,
+        "latency_seconds": round(latency, 3),
+        "tokens": {
+            "prompt": prompt_tokens,
+            "completion": completion_tokens,
+            "total": total_tokens
+        },
+        "parameters": {
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        },
+        "messages": messages,
+        "prompt": prompt,
+        "response": response,
+        "error": error
+    }
+
+def write_log_entry(log_entry: Dict[str, Any]):
+    """Write log entry to timestamped file."""
+    timestamp = datetime.now()
+    log_filename = timestamp.strftime("%Y%m%d_%H%M%S") + ".log"
+    log_filepath = LOGS_DIR / log_filename
+    
+    try:
+        with open(log_filepath, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, indent=2, ensure_ascii=False))
+            f.write("\n" + "="*80 + "\n\n")
+        logger.info(f"Log written to: {log_filepath}")
+    except Exception as e:
+        logger.error(f"Failed to write log: {str(e)}")
+
+def print_request_summary(
+    request_id: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    latency: float,
+    status: str = "success"
+):
+    """Print formatted summary to console."""
+    print("\n" + "="*60)
+    print(f"Request ID: {request_id}")
+    print(f"Status: {status}")
+    print(f"Tokens In: {prompt_tokens}")
+    print(f"Tokens Out: {completion_tokens}")
+    print(f"Total Tokens: {prompt_tokens + completion_tokens}")
+    print(f"Latency: {latency:.3f} seconds")
+    print("="*60 + "\n")
 
 def wait_for_ollama(timeout=60):
     """Wait for Ollama service to be available."""
@@ -95,6 +172,8 @@ def messages_to_prompt(messages: List[Dict[str, str]]) -> tuple[str, str]:
 async def startup_event():
     """Check Ollama availability on startup."""
     logger.info(f"Checking Ollama service at {OLLAMA_API_BASE}")
+    logger.info(f"Logs will be written to: {LOGS_DIR.absolute()}")
+    
     if not wait_for_ollama():
         logger.error("Failed to connect to Ollama service")
         logger.error(f"Please ensure Ollama is installed and running at {OLLAMA_API_BASE}")
@@ -123,12 +202,18 @@ async def index():
                 "max_tokens": 100,
                 "temperature": 0.7
             }
-        }
+        },
+        "logs_directory": str(LOGS_DIR.absolute())
     }
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest, background_tasks: BackgroundTasks):
     """Handle chat completion requests"""
+    # Generate request ID and start timing
+    request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    start_time = time.time()
+    timestamp = datetime.now()
+    
     try:
         # Convert messages to Ollama format
         messages_dict = [msg.dict() for msg in request.messages]
@@ -154,7 +239,7 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
         if system_prompt:
             payload["system"] = system_prompt
         
-        logger.info(f"Sending request to Ollama API for model {MODEL_NAME}")
+        logger.info(f"Request {request_id}: Sending to Ollama API for model {MODEL_NAME}")
         
         # Make request to Ollama API
         response = http.post(
@@ -164,22 +249,50 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
         )
         response.raise_for_status()
         
+        # Calculate latency
+        latency = time.time() - start_time
+        
         # Parse response from Ollama
         ollama_response = response.json()
         generated_text = ollama_response.get("response", "")
         
-        # Create OpenAI-compatible response
-        completion_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-        created_timestamp = int(time.time())
+        # Get token counts
+        prompt_tokens = int(ollama_response.get("prompt_eval_count", len(prompt.split()) * 1.3))
+        completion_tokens = int(ollama_response.get("eval_count", len(generated_text.split()) * 1.3))
+        total_tokens = prompt_tokens + completion_tokens
         
-        # Calculate token counts (approximate if not provided)
-        prompt_tokens = ollama_response.get("prompt_eval_count", len(prompt.split()) * 1.3)
-        completion_tokens = ollama_response.get("eval_count", len(generated_text.split()) * 1.3)
-        total_tokens = int(prompt_tokens + completion_tokens)
+        # Create log entry
+        log_entry = create_log_entry(
+            request_id=request_id,
+            prompt=prompt,
+            response=generated_text,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            latency=latency,
+            model=MODEL_ID,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            messages=messages_dict,
+            timestamp=timestamp,
+            status="success"
+        )
+        
+        # Write log and print summary asynchronously
+        background_tasks.add_task(write_log_entry, log_entry)
+        background_tasks.add_task(
+            print_request_summary,
+            request_id,
+            prompt_tokens,
+            completion_tokens,
+            latency,
+            "success"
+        )
         
         # Format response in OpenAI format
+        created_timestamp = int(timestamp.timestamp())
         openai_response = {
-            "id": completion_id,
+            "id": request_id,
             "object": "chat.completion",
             "created": created_timestamp,
             "model": MODEL_ID,
@@ -194,34 +307,102 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
                 }
             ],
             "usage": {
-                "prompt_tokens": int(prompt_tokens),
-                "completion_tokens": int(completion_tokens),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens
             }
         }
         
-        # Log completion for monitoring
-        background_tasks.add_task(
-            logger.info,
-            f"Generated {completion_tokens} tokens for completion {completion_id}"
-        )
-        
         return openai_response
         
     except requests.RequestException as e:
-        logger.error(f"Ollama API error: {str(e)}")
+        # Calculate latency for error case
+        latency = time.time() - start_time
+        error_msg = f"Ollama API error: {str(e)}"
+        logger.error(f"Request {request_id}: {error_msg}")
+        
+        # Convert messages for logging
+        messages_dict = [msg.dict() for msg in request.messages]
+        prompt, _ = messages_to_prompt(messages_dict)
+        
+        # Create error log entry
+        log_entry = create_log_entry(
+            request_id=request_id,
+            prompt=prompt,
+            response="",
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            latency=latency,
+            model=MODEL_ID,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            messages=messages_dict,
+            timestamp=timestamp,
+            status="error",
+            error=error_msg
+        )
+        
+        # Write log and print summary asynchronously
+        background_tasks.add_task(write_log_entry, log_entry)
+        background_tasks.add_task(
+            print_request_summary,
+            request_id,
+            0,
+            0,
+            latency,
+            "error"
+        )
+        
         return JSONResponse(
             status_code=500,
             content={
                 "error": {
-                    "message": f"Error communicating with Ollama API: {str(e)}",
+                    "message": error_msg,
                     "type": "internal_error",
                     "code": 500
                 }
             }
         )
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        # Calculate latency for error case
+        latency = time.time() - start_time
+        error_msg = f"Unexpected error: {str(e)}"
+        logger.error(f"Request {request_id}: {error_msg}")
+        
+        # Convert messages for logging
+        messages_dict = [msg.dict() for msg in request.messages]
+        prompt, _ = messages_to_prompt(messages_dict)
+        
+        # Create error log entry
+        log_entry = create_log_entry(
+            request_id=request_id,
+            prompt=prompt,
+            response="",
+            prompt_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            latency=latency,
+            model=MODEL_ID,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            messages=messages_dict,
+            timestamp=timestamp,
+            status="error",
+            error=error_msg
+        )
+        
+        # Write log and print summary asynchronously
+        background_tasks.add_task(write_log_entry, log_entry)
+        background_tasks.add_task(
+            print_request_summary,
+            request_id,
+            0,
+            0,
+            latency,
+            "error"
+        )
+        
         return JSONResponse(
             status_code=500,
             content={
@@ -293,7 +474,8 @@ async def health_check():
                 "name": MODEL_NAME,
                 "id": MODEL_ID,
                 "loaded": model_loaded
-            }
+            },
+            "logs_directory": str(LOGS_DIR.absolute())
         }
         
         if not model_loaded:
@@ -308,6 +490,7 @@ async def health_check():
                 "status": "unhealthy",
                 "url": OLLAMA_API_BASE
             },
+            "logs_directory": str(LOGS_DIR.absolute()),
             "help": "Ensure Ollama is installed and running:\n"
                    "1. curl -fsSL https://ollama.com/install.sh | sh\n"
                    "2. systemctl start ollama (or 'ollama serve' if not using systemd)"
