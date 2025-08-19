@@ -160,7 +160,7 @@ async def chat_completions(request: ChatCompletionRequest, background_tasks: Bac
         response = http.post(
             f"{OLLAMA_API_BASE}/generate",
             json=payload,
-            timeout=120
+            timeout=1000
         )
         response.raise_for_status()
         
