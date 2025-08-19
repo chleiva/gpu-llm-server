@@ -27,7 +27,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
-    max_tokens: Optional[int] = 10000
+    max_tokens: Optional[int] = 50000
     temperature: Optional[float] = 0.1
     top_p: Optional[float] = 0.9
     top_k: Optional[int] = 40
